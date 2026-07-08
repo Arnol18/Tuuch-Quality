@@ -764,3 +764,40 @@
       50%  { opacity: .5; }
       100% { opacity: 1; }
     }
+
+    /* ── BOTÓN PUBLICAR ── */
+    .dev-publish-btn {
+      width: 100%;
+      padding: 11px 16px;
+      border-radius: 8px;
+      border: 1px solid rgba(82, 196, 26, 0.4);
+      background: rgba(82, 196, 26, 0.08);
+      color: #52c41a;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
+    .dev-publish-btn:hover:not(:disabled) {
+      background: rgba(82, 196, 26, 0.18);
+      border-color: rgba(82, 196, 26, 0.7);
+      box-shadow: 0 0 14px rgba(82, 196, 26, 0.25);
+    }
+    .dev-publish-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    /* Estado: hay cambios sin publicar → naranja pulsante */
+    .dev-publish-btn.dev-publish-pending {
+      border-color: rgba(255, 169, 64, 0.7);
+      background: rgba(255, 169, 64, 0.12);
+      color: #ffa940;
+      animation: publishPulse 1.6s ease-in-out infinite;
+      box-shadow: 0 0 18px rgba(255, 169, 64, 0.25);
+    }
+    @keyframes publishPulse {
+      0%, 100% { box-shadow: 0 0 12px rgba(255, 169, 64, 0.2); }
+      50%       { box-shadow: 0 0 24px rgba(255, 169, 64, 0.5); }
+    }

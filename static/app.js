@@ -19,6 +19,10 @@ const COLORS = {
 const PARAMS = Object.keys(LIMITS);
 
 let currentValues = { ph: null, temperatura: null, orp: null, conductividad: null, turbidez: null, oxigeno: null };
+// Timestamps de cambios locales por parámetro (ms desde epoch).
+// Cuando el usuario mueve un slider registramos el timestamp y evitamos
+// que fetchLive() sobrescriba ese parámetro durante unos segundos.
+let lastLocalChange = { ph: 0, temperatura: 0, orp: 0, conductividad: 0, turbidez: 0, oxigeno: 0 };
 let history      = [];
 let visible      = { ph: true, temperatura: true, orp: true, conductividad: true, turbidez: true, oxigeno: true };
 let sparkCharts  = {};
@@ -91,17 +95,42 @@ async function fetchLive() {
     const json = await res.json();
     if (!json.ok || !json.data) return false;
     const d = json.data;
-    PARAMS.forEach(p => {
-      if (d[p] !== undefined && d[p] !== null) currentValues[p] = +d[p];
-    });
+
+    // Si hay un borrador activo en el panel, NO sobreescribimos currentValues
+    // para que el editor vea su preview local en lugar del último valor publicado.
+    if (!devDraftActive) {
+      // Si el servidor tiene un override activo, sus datos son la fuente de verdad
+      // para TODOS los clientes (panel abierto o no). No bloqueamos ningún parámetro.
+      const esOverride = json.override === true;
+
+      if (esOverride) {
+        // Override activo: aceptar todos los valores del servidor sin restricción
+        PARAMS.forEach(p => {
+          if (d[p] !== undefined && d[p] !== null) currentValues[p] = +d[p];
+        });
+      } else {
+        // Sin override: respetar el bloqueo local solo cuando el usuario está
+        // arrastrando un slider en este mismo dispositivo.
+        const LOCAL_HOLD_MS = 3000;
+        const now = Date.now();
+        PARAMS.forEach(p => {
+          if (d[p] === undefined || d[p] === null) return;
+          if (lastLocalChange[p] && (now - lastLocalChange[p]) < LOCAL_HOLD_MS) return;
+          currentValues[p] = +d[p];
+        });
+      }
+    }
+
     document.getElementById('lastUpdate').textContent = d.hora || new Date().toLocaleTimeString('es-MX');
     connected = json.conexion ?? true;
+    renderCurrentValues(); // Refresca los valores numéricos y badges al recibir datos nuevos
     return true;
   } catch(e) {
     connected = false;
     return false;
   }
 }
+
 
 // ── INICIALIZAR SPARKS ───────────────────────────────────
 function initSparks() {
@@ -128,11 +157,38 @@ function initSparks() {
 function initMainChart() {
   const ctx = document.getElementById('mainChart').getContext('2d');
   chartData.labels = [];
+  
+  // Crear escalas dinámicas para cada parámetro para evitar que las líneas
+  // se aplanen debido a los diferentes rangos (ej. pH 7 vs Conductividad 800)
+  const scales = {
+    x: { ticks: { color: '#5a8fa8', font: { size: 10 }, maxTicksLimit: 6 }, grid: { color: 'rgba(64,169,255,0.08)' } }
+  };
+  
+  PARAMS.forEach(p => {
+    const rango = LIMITS[p].max - LIMITS[p].min;
+    scales['y_' + p] = {
+      type: 'linear',
+      display: false, // Ocultar los múltiples ejes Y para no saturar la vista
+      suggestedMin: LIMITS[p].min - (rango * 0.2),
+      suggestedMax: LIMITS[p].max + (rango * 0.2)
+    };
+  });
+  // Eje Y genérico para mantener la cuadrícula (grid) de fondo
+  scales['y_grid'] = {
+    type: 'linear',
+    display: true,
+    position: 'left',
+    ticks: { display: false },
+    grid: { color: 'rgba(64,169,255,0.08)' }
+  };
+
   chartData.datasets = PARAMS.map(p => ({
     label: LIMITS[p].label,
     data: [],
-    borderColor: COLORS[p], pointRadius: 0, borderWidth: 1.5, tension: .4, fill: false, hidden: false
+    borderColor: COLORS[p], pointRadius: 0, borderWidth: 1.5, tension: .4, fill: false, hidden: false,
+    yAxisID: 'y_' + p
   }));
+  
   mainChartRef = new Chart(ctx, {
     type: 'line',
     data: chartData,
@@ -142,16 +198,14 @@ function initMainChart() {
         legend: { display: false },
         tooltip: { mode: 'index', intersect: false }
       },
-      scales: {
-        x: { ticks: { color: '#5a8fa8', font: { size: 10 }, maxTicksLimit: 6 }, grid: { color: 'rgba(64,169,255,0.08)' } },
-        y: { ticks: { color: '#5a8fa8', font: { size: 10 } }, grid: { color: 'rgba(64,169,255,0.08)' } }
-      },
+      scales: scales,
       animation: { duration: 300 }
     }
   });
 
   // Leyenda
   const legend = document.getElementById('legend');
+  legend.innerHTML = ''; // Limpiar por si acaso
   PARAMS.forEach(p => {
     const item = document.createElement('div');
     item.className = 'legend-item';
@@ -160,8 +214,7 @@ function initMainChart() {
   });
 }
 
-// ── ACTUALIZAR UI CON DATOS REALES ───────────────────────
-function updateUI() {
+function renderCurrentValues() {
   const sinDatos = PARAMS.every(p => currentValues[p] === null);
 
   PARAMS.forEach(p => {
@@ -186,40 +239,8 @@ function updateUI() {
     } else {
       badge.textContent = 'ÓPTIMO';     badge.className = 'param-badge badge-opt';
     }
-
-    // Spark chart
-    if (sparkCharts[p]) {
-      const d = sparkCharts[p].data.datasets[0].data;
-      d.push(v); if (d.length > 20) d.shift();
-      sparkCharts[p].update();
-    }
   });
 
-  // Gráfico principal
-  if (mainChartRef && !sinDatos) {
-    const lbl = new Date().toLocaleTimeString('es-MX');
-    chartData.labels.push(lbl);
-    if (chartData.labels.length > MAX_PTS) chartData.labels.shift();
-    PARAMS.forEach((p, i) => {
-      if (currentValues[p] !== null) {
-        chartData.datasets[i].data.push(+currentValues[p].toFixed(2));
-        if (chartData.datasets[i].data.length > MAX_PTS) chartData.datasets[i].data.shift();
-      }
-    });
-    mainChartRef.update();
-  }
-
-  // Historial
-  if (!sinDatos) {
-    history.unshift({
-      hora:  new Date().toLocaleTimeString('es-MX'),
-      fecha: new Date().toLocaleDateString('es-MX'),
-      ...Object.fromEntries(PARAMS.map(p => [p, currentValues[p] !== null ? +currentValues[p].toFixed(2) : null]))
-    });
-    if (history.length > 200) history.pop();
-  }
-
-  // Estado general
   const anyBad  = PARAMS.some(p => currentValues[p] !== null && (currentValues[p] < LIMITS[p].min || currentValues[p] > LIMITS[p].max));
   const anyWarn = PARAMS.some(p => {
     if (currentValues[p] === null) return false;
@@ -232,7 +253,6 @@ function updateUI() {
   else if (anyWarn)   { ql.textContent = 'PRECAUCIÓN'; ql.style.color = 'var(--orange)'; }
   else                { ql.textContent = 'EXCELENTE';  ql.style.color = 'var(--green)'; }
 
-  // Badge de conexión
   const dot   = document.querySelector('.status-dot');
   const badge = document.querySelector('.status-badge');
   const txtNode = badge ? badge.lastChild : null;
@@ -249,7 +269,56 @@ function updateUI() {
   }
 
   updateSideAlerts();
+  return sinDatos;
 }
+
+// ── ACTUALIZAR UI CON DATOS REALES ───────────────────────
+// pushToChart=true  → acumula un punto nuevo en el gráfico principal (comportamiento normal)
+// pushToChart=false → solo refresca los valores/badges sin añadir punto (modo borrador o primer render)
+function updateUI(pushToChart = true) {
+  const sinDatos = renderCurrentValues();
+
+  // En modo borrador (pushToChart=false) solo refrescamos los valores numéricos
+  // y los badges — sin tocar sparks, gráfico principal ni historial local.
+  if (!pushToChart) {
+    if (mainChartRef) mainChartRef.update();
+    return;
+  }
+
+  PARAMS.forEach(p => {
+    if (currentValues[p] !== null && sparkCharts[p]) {
+      const d = sparkCharts[p].data.datasets[0].data;
+      d.push(currentValues[p]);
+      if (d.length > 20) d.shift();
+      sparkCharts[p].update();
+    }
+  });
+
+  if (mainChartRef && !sinDatos) {
+    const lbl = new Date().toLocaleTimeString('es-MX');
+    chartData.labels.push(lbl);
+    if (chartData.labels.length > MAX_PTS) chartData.labels.shift();
+    PARAMS.forEach((p, i) => {
+      if (currentValues[p] !== null) {
+        chartData.datasets[i].data.push(+currentValues[p].toFixed(2));
+        if (chartData.datasets[i].data.length > MAX_PTS) chartData.datasets[i].data.shift();
+      }
+    });
+    mainChartRef.update();
+  } else if (mainChartRef) {
+    mainChartRef.update();
+  }
+
+  if (!sinDatos) {
+    history.unshift({
+      hora:  new Date().toLocaleTimeString('es-MX'),
+      fecha: new Date().toLocaleDateString('es-MX'),
+      ...Object.fromEntries(PARAMS.map(p => [p, currentValues[p] !== null ? +currentValues[p].toFixed(2) : null]))
+    });
+    if (history.length > 200) history.pop();
+  }
+}
+
 
 // ── ALERTAS ──────────────────────────────────────────────
 function updateSideAlerts() {
@@ -389,15 +458,102 @@ initSparks();
 initMainChart();
 updateSideAlerts();
 
+// ════════════════════════════════════════════════════════════
+//  MODO DEMO — datos simulados sin ESP32 ni servidor
+// ════════════════════════════════════════════════════════════
+
+let demoActive  = false;
+let demoTimer   = null;
+let demoTargets = { ph:7.2, temperatura:22, orp:280, conductividad:450, turbidez:1.0, oxigeno:9.5 };
+
+const DEMO_PRESETS = {
+  optimo:     { ph:7.2, temperatura:22, orp:280, conductividad:450, turbidez:1.0,  oxigeno:9.5  },
+  precaucion: { ph:6.6, temperatura:28.5, orp:160, conductividad:750, turbidez:3.6, oxigeno:6.2 },
+  alerta:     { ph:5.5, temperatura:35,  orp:80,  conductividad:1200,turbidez:8.5, oxigeno:3.0  }
+};
+
+function toggleDemo() {
+  demoActive = !demoActive;
+  const btn = document.getElementById('demoDashBtn');
+  const lbl = document.getElementById('demoBtnLabel');
+
+  if (demoActive) {
+    // Bloquear el fetch real mientras el demo está activo
+    devApiLocked = true;
+    if (btn) btn.classList.add('demo-on');
+    if (lbl) lbl.textContent = 'DEMO ON';
+    startDemo();
+  } else {
+    devApiLocked = false;
+    if (btn) btn.classList.remove('demo-on');
+    if (lbl) lbl.textContent = 'DEMO';
+    clearInterval(demoTimer); demoTimer = null;
+  }
+}
+
+function startDemo() {
+  clearInterval(demoTimer);
+  tickDemo();
+  demoTimer = setInterval(tickDemo, 2500);
+}
+
+function tickDemo() {
+  if (!demoActive) return;
+  PARAMS.forEach(p => {
+    // Interpolación suave hacia el target + ruido pequeño
+    const noise = (Math.random() - 0.5) * 0.04 * (LIMITS[p].max - LIMITS[p].min);
+    currentValues[p] = parseFloat(
+      (currentValues[p] !== null
+        ? currentValues[p] * 0.8 + demoTargets[p] * 0.2 + noise
+        : demoTargets[p]
+      ).toFixed(2)
+    );
+  });
+  updateUI(true);  // acumula punto en el gráfico
+}
+
+function demoSetScenario(nombre) {
+  if (nombre === 'random') {
+    PARAMS.forEach(p => {
+      const l = LIMITS[p];
+      demoTargets[p] = parseFloat((l.min - (l.max-l.min)*0.1 + Math.random() * (l.max-l.min)*1.2).toFixed(2));
+    });
+  } else {
+    demoTargets = { ...DEMO_PRESETS[nombre] };
+  }
+  if (!demoActive) toggleDemo(); // activa si no estaba
+}
+
 async function tick() {
   if (!isRunning) return;
-  // En modo manual o con API bloqueada, no sobreescribir los valores
-  if (typeof devApiLocked === 'undefined' || (!devApiLocked && !devManual)) {
+  // Solo bloqueamos la lectura cuando la API está deliberadamente bloqueada.
+  // En todos los demás casos debemos leer /api/live para que todos los
+  // dispositivos muestren la misma información en tiempo real.
+  if (!devApiLocked) {
     await fetchLive();
   }
   updateUI();
+  syncSlidersFromServer();
 }
 
+// ── Sincroniza sliders del panel con los valores recibidos del servidor ──
+// Solo actúa si el panel está abierto para no hacer trabajo innecesario.
+function syncSlidersFromServer() {
+  if (!devPanelOpen) return;
+  PARAMS.forEach(p => {
+    const sl  = document.getElementById('dev-' + p);
+    const lbl = document.getElementById('dev-' + p + '-val');
+    if (sl && lbl && currentValues[p] !== null) {
+      // Solo actualiza si el valor cambió (evita mover el slider mientras el
+      // usuario lo está arrastrando con una diferencia mínima de 0.01)
+      const diff = Math.abs(parseFloat(sl.value) - currentValues[p]);
+      if (diff > 0.01) {
+        sl.value        = currentValues[p];
+        lbl.textContent = formatDevVal(p, currentValues[p]);
+      }
+    }
+  });
+}
 
 // Arrancar en modo RUNNING
 startTicking();
@@ -437,6 +593,11 @@ let devPanelOpen = false;
 let devManual    = false;   // true = los sliders controlan; false = API
 let devApiLocked = false;   // true = fetchLive() bloqueado
 
+// Borrador: valores locales mientras el usuario edita en el panel.
+// NO se envían al servidor hasta que presione «Publicar».
+let devDraft = {};  // { ph: 7.2, temperatura: 22, ... }
+let devDraftActive = false;  // true mientras el panel tenga cambios sin publicar
+
 function openDevPanel() {
   const inner = document.getElementById('devPanelInner');
   if (!inner) return;
@@ -469,19 +630,99 @@ function formatDevVal(p, v) {
   return v.toFixed(2);
 }
 
-// ── Slider → currentValues → UI ──────────────────────────
+// ── Slider → borrador LOCAL (no toca el servidor hasta publicar) ────────
 function devSetValue(p, rawVal) {
   const v   = parseFloat(rawVal);
   const lbl = document.getElementById('dev-' + p + '-val');
   if (lbl) lbl.textContent = formatDevVal(p, v);
 
-  // Activar modo manual
+  // Activar modo manual solo localmente
   devManual = true;
-  document.getElementById('devModeLabel').textContent  = 'MANUAL';
-  document.getElementById('devModeLabel').style.color  = '#ffa940';
+  document.getElementById('devModeLabel').textContent = 'BORRADOR';
+  document.getElementById('devModeLabel').style.color = '#ffa940';
 
+  // Guardar en borrador — NO se envía al servidor todavía
+  devDraft[p] = v;
+  devDraftActive = true;
+
+  // Actualizar el indicador del botón Publicar
+  _updatePublishBtn();
+
+  // Preview LOCAL solo para quien tiene el panel abierto
   currentValues[p] = v;
-  updateUI();
+  updateUI(false);  // false = no agrega punto al historial del gráfico
+}
+
+// ── Actualiza el aspecto del botón Publicar ─────────────────────────────
+function _updatePublishBtn() {
+  const btn = document.getElementById('devPublishBtn');
+  if (!btn) return;
+  if (devDraftActive) {
+    btn.classList.add('dev-publish-pending');
+    btn.textContent = '📤 PUBLICAR CAMBIOS';
+  } else {
+    btn.classList.remove('dev-publish-pending');
+    btn.textContent = '✅ PUBLICADO';
+  }
+}
+
+// ── PUBLICAR: envía el borrador al servidor → todos los visitantes lo ven ──
+async function devPublish() {
+  if (!devDraftActive && Object.keys(devDraft).length === 0) return;
+
+  const btn = document.getElementById('devPublishBtn');
+  if (btn) { btn.textContent = '⏳ Enviando...'; btn.disabled = true; }
+
+  try {
+    // Mezclar borrador con currentValues para enviar todos los parámetros
+    const payload = {};
+    PARAMS.forEach(p => {
+      const val = devDraft[p] !== undefined ? devDraft[p] : currentValues[p];
+      if (val !== null && val !== undefined) payload[p] = val;
+    });
+
+    await fetch('/api/override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+
+    // Una vez publicado, marcamos que no hay borrador pendiente
+    devDraft = {};
+    devDraftActive = false;
+    document.getElementById('devModeLabel').textContent = 'PUBLICADO';
+    document.getElementById('devModeLabel').style.color = '#52c41a';
+
+    if (btn) {
+      btn.textContent = '✅ PUBLICADO';
+      btn.classList.remove('dev-publish-pending');
+      btn.disabled = false;
+      // Volver a estado normal tras 2 segundos
+      setTimeout(() => _updatePublishBtn(), 2000);
+    }
+  } catch(e) {
+    console.warn('[DevPanel] No se pudo publicar:', e);
+    if (btn) { btn.textContent = '❌ Error al publicar'; btn.disabled = false; }
+  }
+}
+
+// ── Envía currentValues al servidor (solo llamado al Publicar o Restaurar) ──
+async function devPushOverride() {
+  try {
+    const payload = {};
+    PARAMS.forEach(p => {
+      if (currentValues[p] !== null && currentValues[p] !== undefined) {
+        payload[p] = currentValues[p];
+      }
+    });
+    await fetch('/api/override', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch(e) {
+    console.warn('[DevPanel] No se pudo enviar override al servidor:', e);
+  }
 }
 
 // ── Escenarios rápidos ────────────────────────────────────
@@ -504,19 +745,24 @@ function devPreset(nombre) {
   if (nombre === 'random') {
     PARAMS.forEach(p => {
       const l = LIMITS[p];
-      // Genera un valor aleatorio dentro de ±30% fuera del rango para mezclar estados
       const span  = (l.max - l.min) * 1.3;
       const base  = l.min - (l.max - l.min) * 0.15;
-      currentValues[p] = parseFloat((base + Math.random() * span).toFixed(2));
+      const val   = parseFloat((base + Math.random() * span).toFixed(2));
+      currentValues[p] = val;
+      devDraft[p]      = val;
     });
   } else {
     const preset = DEV_PRESETS[nombre];
     if (!preset) return;
-    PARAMS.forEach(p => { currentValues[p] = preset[p]; });
+    PARAMS.forEach(p => {
+      currentValues[p] = preset[p];
+      devDraft[p]      = preset[p];
+    });
   }
 
   devManual = true;
-  document.getElementById('devModeLabel').textContent = 'MANUAL';
+  devDraftActive = true;
+  document.getElementById('devModeLabel').textContent = 'BORRADOR';
   document.getElementById('devModeLabel').style.color = '#ffa940';
 
   // Sincronizar sliders
@@ -525,12 +771,14 @@ function devPreset(nombre) {
     const lbl = document.getElementById('dev-' + p + '-val');
     if (!sl || !lbl) return;
     if (currentValues[p] !== null) {
-      sl.value         = currentValues[p];
-      lbl.textContent  = formatDevVal(p, currentValues[p]);
+      sl.value        = currentValues[p];
+      lbl.textContent = formatDevVal(p, currentValues[p]);
     }
   });
 
-  updateUI();
+  // Preview LOCAL — no envía al servidor todavía
+  updateUI(false);
+  _updatePublishBtn();
 }
 
 // ── Bloqueo / desbloqueo de la API ───────────────────────
@@ -549,16 +797,27 @@ function devToggleLock() {
   }
 }
 
-// ── Reset: vuelve al modo automático ─────────────────────
-function devReset() {
-  devManual    = false;
-  devApiLocked = false;
+// ── Reset: vuelve al modo automático ─────────────────────────
+async function devReset() {
+  devManual      = false;
+  devApiLocked   = false;
+  devDraft       = {};
+  devDraftActive = false;
 
   document.getElementById('devModeLabel').textContent = 'AUTOMÁTICO';
   document.getElementById('devModeLabel').style.color = '#36cfc9';
   document.getElementById('devApiLabel').textContent  = 'NO';
   document.getElementById('devApiLabel').style.color  = '#36cfc9';
   document.getElementById('devLockLabel').textContent = 'Bloquear API';
+  _updatePublishBtn();
+
+  // Limpiar override en el servidor — todos los dispositivos vuelven a datos reales
+  try {
+    await fetch('/api/override/clear', { method: 'POST' });
+  } catch(e) {
+    console.warn('[DevPanel] No se pudo limpiar override:', e);
+  }
+
   // Si el simulador estaba activo, también desconectarlo
   devSimDisconnect(false);
 }
@@ -669,6 +928,9 @@ async function devSimPoll() {
         lbl.textContent = formatDevVal(p, currentValues[p]);
       }
     });
+
+    // Enviar al servidor para que todos los dispositivos lo vean
+    devPushOverride();
 
   } catch(e) {
     updateSimUI(null, '⚠ Conexión perdida');

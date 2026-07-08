@@ -8,6 +8,8 @@ from flask import Flask, render_template, jsonify, send_file, request, abort
 from datetime import datetime
 import io
 import csv
+import json
+import os
 
 app = Flask(__name__)
 
@@ -28,6 +30,37 @@ def after_request(response):
 mediciones = []
 dispositivos = {}
 contador_id = 0
+
+# ── OVERRIDE: valores inyectados desde el panel oculto ────
+# Se persiste en un archivo JSON para que todos los workers
+# de PythonAnywhere compartan el mismo estado.
+OVERRIDE_FILE = os.path.join(os.path.dirname(__file__), "override_state.json")
+
+
+def _load_override():
+    """Lee el estado del override desde el archivo. Devuelve (active, data)."""
+    try:
+        if os.path.exists(OVERRIDE_FILE):
+            with open(OVERRIDE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+                return state.get("active", False), state.get("data", {})
+    except Exception:
+        pass
+    return False, {}
+
+
+def _save_override(active, data):
+    """Escribe el estado del override al archivo."""
+    try:
+        with open(OVERRIDE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"active": active, "data": data}, f)
+    except Exception as e:
+        print(f"⚠️  No se pudo guardar override: {e}")
+
+
+# Compatibilidad con código legado (ya no se usan como fuente de verdad)
+override_active = False
+override_data   = {}
 
 
 # ══════════════════════════════════════════════════════════
@@ -189,10 +222,36 @@ def recibir_datos():
 def api_live():
 
     # ─────────────────────────────────────────────
-    # SIN DATOS
+    # Leer override desde archivo (compartido entre workers)
+    # ─────────────────────────────────────────────
+    ov_active, ov_data = _load_override()
+
+    hora_actual, fecha_actual = ahora()
+
+    # ─────────────────────────────────────────────
+    # OVERRIDE ACTIVO: devolver valores del panel oculto
+    # funciona aunque no haya datos del ESP32 todavía
+    # ─────────────────────────────────────────────
+    if ov_active and ov_data:
+        ultima = mediciones[-1] if mediciones else {}
+        data_resp = {
+            "id_dispositivo": ultima.get("id_dispositivo", "PANEL"),
+            "fecha": fecha_actual,
+            "hora": hora_actual,
+            **ov_data
+        }
+        return jsonify({
+            "ok":      True,
+            "conexion": True,
+            "override": True,
+            "ultima_actualizacion_seg": 0,
+            "data": data_resp
+        })
+
+    # ─────────────────────────────────────────────
+    # SIN DATOS del ESP32 y sin override
     # ─────────────────────────────────────────────
     if not mediciones:
-
         return jsonify({
             "ok": False,
             "mensaje": "Sin datos",
@@ -229,15 +288,49 @@ def api_live():
         conectado = False
         diferencia = 999
 
-    # ─────────────────────────────────────────────
-    # RESPUESTA
-    # ─────────────────────────────────────────────
     return jsonify({
         "ok": True,
         "conexion": conectado,
         "ultima_actualizacion_seg": round(diferencia, 1),
         "data": ultima
     })
+
+
+# ══════════════════════════════════════════════════════════
+#  OVERRIDE — panel oculto empuja valores al servidor
+# ══════════════════════════════════════════════════════════
+@app.route("/api/override", methods=["POST"])
+def api_override():
+
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"ok": False, "error": "JSON inválido"}), 400
+
+    # Cargar el estado previo y hacer MERGE con los nuevos valores
+    # para que mover un slider no borre los otros parámetros ya configurados.
+    _, prev_data = _load_override()
+    valores = dict(prev_data)  # empieza con lo que ya había
+
+    for p in PARAMS:
+        v = data.get(p)
+        if v is not None:
+            try:
+                valores[p] = round(float(v), 3)
+            except:
+                pass
+
+    _save_override(True, valores)
+
+    print(f"\n🎛  OVERRIDE ACTIVADO: {valores}")
+
+    return jsonify({"ok": True, "override": True, "data": valores})
+
+
+@app.route("/api/override/clear", methods=["POST", "GET"])
+def api_override_clear():
+    _save_override(False, {})
+    print("\n🔄 OVERRIDE DESACTIVADO — volviendo a datos del ESP32")
+    return jsonify({"ok": True, "override": False})
 
 
 # ══════════════════════════════════════════════════════════
