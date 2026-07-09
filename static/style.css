@@ -801,3 +801,116 @@
       0%, 100% { box-shadow: 0 0 12px rgba(255, 169, 64, 0.2); }
       50%       { box-shadow: 0 0 24px rgba(255, 169, 64, 0.5); }
     }
+
+    /* ==========================================================
+   RESPONSIVE - TABLETS (1024px)
+========================================================== */
+@media (max-width: 1024px) {
+
+    .main{
+        grid-template-columns: 240px 1fr;
+    }
+
+    .right-col{
+        grid-column: 1 / -1;
+        display:grid;
+        grid-template-columns: repeat(2,1fr);
+        gap:12px;
+    }
+
+    .alerts-panel{
+        grid-column:1 / -1;
+    }
+
+    .bottom-row{
+        grid-template-columns:1fr;
+    }
+
+}
+
+/* ==========================================================
+   RESPONSIVE - CELULARES
+========================================================== */
+
+@media (max-width:768px){
+
+    header{
+        flex-wrap:wrap;
+        gap:12px;
+        padding:14px;
+    }
+
+    .header-title{
+        width:100%;
+        text-align:center;
+        order:3;
+    }
+
+    .header-right{
+        width:100%;
+        justify-content:space-between;
+    }
+
+    .main{
+        display:flex;
+        flex-direction:column;
+        padding:12px;
+        gap:12px;
+    }
+
+    .params-col{
+        display:grid;
+        grid-template-columns:1fr;
+        gap:12px;
+    }
+
+    .param-card{
+        width:100%;
+    }
+
+    .center-col{
+        width:100%;
+    }
+
+    .right-col{
+        width:100%;
+        display:flex;
+        flex-direction:column;
+    }
+
+    .chart-wrap{
+        height:280px;
+    }
+
+    .bottom-row{
+        display:flex;
+        flex-direction:column;
+    }
+
+    .status-panel{
+        flex-direction:column;
+        text-align:center;
+    }
+
+    .device-row{
+        font-size:13px;
+    }
+
+    .nav-btn{
+        padding:14px;
+    }
+
+    .modal{
+        width:95%;
+    }
+
+    .hist-stats{
+        grid-template-columns:1fr;
+    }
+
+    .hist-table{
+        display:block;
+        overflow-x:auto;
+    }
+
+}
